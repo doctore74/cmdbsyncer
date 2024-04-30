@@ -78,6 +78,8 @@ class BaseConfig():
     CMK_BULK_UPDATE_HOSTS = True
     CMK_BULK_UPDATE_OPERATIONS = 50
 
+    MULTIPROCESS = 40
+
 class ProductionConfig(BaseConfig):
     """
     Production Configuration.

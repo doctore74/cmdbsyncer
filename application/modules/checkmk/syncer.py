@@ -5,6 +5,7 @@ Add Hosts into CMK Version 2 Installations
 #pylint: disable=logging-fstring-interpolation
 import ast
 import time
+import multiprocessing
 from application import app
 from application.models.host import Host
 from application.modules.checkmk.cmk2 import CMK2, CmkException
@@ -86,7 +87,7 @@ class SyncCMK2(CMK2):
         Check if Folders need Update
         """
 
-        print(f"{CC.OKGREEN} -- {CC.ENDC}Check if we need to update Folders")
+        print(f"{CC.OKGREEN} -- {CC.ENDC}Check if we need to update Folders", flush=True)
         for folder_name, target_attributes in self.custom_folder_attributes.items():
             add_attributes = {}
             update_attributes = {}
@@ -109,7 +110,7 @@ class SyncCMK2(CMK2):
             if 'title' in update_attributes and \
                 curren_folder['title'] != update_attributes['title']:
                 new_title = update_attributes['title']
-                print(f"{CC.OKGREEN} *{CC.ENDC} Update Title: {folder_name} to '{new_title}'")
+                print(f"{CC.OKGREEN} *{CC.ENDC} Update Title: {folder_name} to '{new_title}'", flush=True)
                 payload = {
                     'title' : new_title,
                 }
@@ -123,7 +124,7 @@ class SyncCMK2(CMK2):
                 etag = headers['etag']
             if add_attributes:
                 print(f"{CC.OKGREEN} *{CC.ENDC} Add Attributes to Folder: "\
-                      f"{folder_name} ({add_attributes})")
+                      f"{folder_name} ({add_attributes})", flush=True)
                 payload = {
                     'attributes' : add_attributes
                 }
@@ -145,7 +146,7 @@ class SyncCMK2(CMK2):
                              data=payload,
                              additional_header=update_headers)
                 print(f"{CC.OKGREEN} *{CC.ENDC} Update Attributes on Folder: {folder_name} "\
-                      f"({update_attributes})")
+                      f"({update_attributes})", flush=True)
 
 
     def fetch_checkmk_hosts(self):
@@ -230,6 +231,8 @@ class SyncCMK2(CMK2):
         db_objects = Host.get_export_hosts()
         total = db_objects.count()
         counter = 0
+        processes = []
+        max_proccesses = app.config['MULTIPROCESS']
         for db_host in db_objects:
             counter += 1
 
@@ -237,106 +240,24 @@ class SyncCMK2(CMK2):
                 continue
 
             process = 100.0 * counter / total
-            print(f"\n{CC.OKBLUE}({process:.0f}%){CC.ENDC} {db_host.hostname}")
 
-            attributes = self.get_host_attributes(db_host, 'checkmk')
-            if not attributes:
-                print(f"{CC.WARNING} *{CC.ENDC} Host ignored by rules")
-                continue
-            next_actions = self.get_host_actions(db_host, attributes['all'])
-
-            self.label_prefix = next_actions.get('label_prefix')
-
-            label_prefix = ""
-            if self.label_prefix:
-                label_prefix = self.label_prefix
-            labels = {f"{label_prefix}{k}":str(v) for k,v in attributes['filtered'].items()}
-
-            self.only_update_prefixed_labels = next_actions.get('only_update_prefixed_labels')
-
-            self.synced_hosts.append(db_host.hostname)
-            labels['cmdb_syncer'] = self.account_id
-
-            dont_move_host = next_actions.get('dont_move', False)
-            dont_update_host = next_actions.get('dont_update', False)
-
-            folder = '/'
-
-
-
-            if 'move_folder' in next_actions:
-                # Get the Folder where we move to
-                # We need that even dont_move is set, because could be for the
-                # inital creation
-                folder = next_actions['move_folder']
-                if '{' in next_actions.get('extra_folder_options', ''):
-                    self.handle_extra_folder_options(next_actions['extra_folder_options'])
-
-            cluster_nodes = [] # if true, we have a cluster
-            if 'create_cluster' in next_actions:
-                cluster_nodes = next_actions['create_cluster']
-
-            if folder not in self.existing_folders:
-                # We may need to create them later
-                self.create_folder(folder)
-                self.existing_folders.append(folder)
-
-            additional_attributes = {}
-            if 'parents' in next_actions:
-                additional_attributes['parents'] = next_actions['parents']
-
-            remove_attributes = []
-            if 'remove_attributes' in next_actions:
-                remove_attributes = next_actions['remove_attributes']
-            logger.debug(f'Attributes will be removed: {remove_attributes}')
-
-            for custom_attr in next_actions.get('custom_attributes', []):
-                logger.debug(f"Check to add Custom Attribute: {custom_attr}")
-                for attr_key in list(custom_attr):
-                    if attr_key in remove_attributes:
-                        del custom_attr[attr_key]
-                        logger.debug(f"Don't add Attribute {attr_key}, its in remove_attributes")
-                additional_attributes.update(custom_attr)
-
-            for additional_attr in next_actions.get('attributes', []):
-                logger.debug(f"Check to add Attribute: {additional_attr}")
-                if attr_value := attributes['all'].get(additional_attr):
-                    additional_attributes[additional_attr] = attr_value
-
-
-            if db_host.hostname not in self.checkmk_hosts:
-                # Create since missing
-                if cluster_nodes:
-                    print(f"{CC.OKBLUE} *{CC.ENDC} Will be created as Cluster")
-                    # We need to create them Later, since we not know that we have all nodes
-                    self.clusters.append((db_host, folder, labels, \
-                                        cluster_nodes, additional_attributes))
+            if max_proccesses:
+                if len(processes) < max_proccesses:
+                    print(f"\n{CC.OKBLUE}({process:.0f}%){CC.ENDC} {db_host.hostname}")
+                    p = multiprocessing.Process(target=self.process_host, args=(db_host,))
+                    processes.append(p)
+                    p.start()
                 else:
-                    print(f"{CC.OKBLUE} *{CC.ENDC} Need to created in Checkmk")
-                    self.create_host(db_host, folder, labels, additional_attributes)
-                # Add Host information to the dict, for later cleanup.
-                # So no need to query all the hosta again
-                self.checkmk_hosts[db_host.hostname] = \
-                            {'extensions': {
-                                'attributes':{
-                                     'labels': {
-                                          'cmdb_syncer': self.account_id
-                                }}
-                             }}
-            elif not dont_update_host:
-                cmk_host = self.checkmk_hosts[db_host.hostname]
-                # Update if needed
-                self.update_host(db_host, cmk_host, folder,
-                                labels, additional_attributes, remove_attributes,
-                                dont_move_host)
-                if cluster_nodes:
-                    cmk_cluster = cmk_host['extensions']['cluster_nodes']
-                    self.cluster_updates.append((db_host, cmk_cluster, cluster_nodes))
+                    print("wait for process")
+                    for p in processes:
+                        p.join()
+                    processes = []
             else:
-                print(f"{CC.OKBLUE} *{CC.ENDC} Host is not to be updated")
+                print(f"\n{CC.OKBLUE}({process:.0f}%){CC.ENDC} {db_host.hostname}")
+                self.process_host(db_host)
 
-            db_host.save()
-        print()
+        for p in processes:
+            p.join()
 
         # Final Call to create missing hosts via bulk
         if self.bulk_creates:
@@ -359,6 +280,107 @@ class SyncCMK2(CMK2):
         log.log(f"Synced Hosts to Account: {self.account_name}", source="checkmk_host_export",
                 details=self.log_details, duration=duration)
 
+    def process_host(self, db_host):
+        """
+        Process Host Actions
+        """
+        attributes = self.get_host_attributes(db_host, 'checkmk')
+        if not attributes:
+            print(f"{CC.WARNING} *{CC.ENDC} Host ignored by rules", flush=True)
+            return False
+
+        next_actions = self.get_host_actions(db_host, attributes['all'])
+
+        self.label_prefix = next_actions.get('label_prefix')
+
+        label_prefix = ""
+        if self.label_prefix:
+            label_prefix = self.label_prefix
+        labels = {f"{label_prefix}{k}":str(v) for k,v in attributes['filtered'].items()}
+
+        self.only_update_prefixed_labels = next_actions.get('only_update_prefixed_labels')
+
+        self.synced_hosts.append(db_host.hostname)
+        labels['cmdb_syncer'] = self.account_id
+
+        dont_move_host = next_actions.get('dont_move', False)
+        dont_update_host = next_actions.get('dont_update', False)
+
+        folder = '/'
+
+        if 'move_folder' in next_actions:
+            # Get the Folder where we move to
+            # We need that even dont_move is set, because could be for the
+            # inital creation
+            folder = next_actions['move_folder']
+            if '{' in next_actions.get('extra_folder_options', ''):
+                self.handle_extra_folder_options(next_actions['extra_folder_options'])
+
+        cluster_nodes = [] # if true, we have a cluster
+        if 'create_cluster' in next_actions:
+            cluster_nodes = next_actions['create_cluster']
+
+        if folder not in self.existing_folders:
+            # We may need to create them later
+            self.create_folder(folder)
+            self.existing_folders.append(folder)
+
+        additional_attributes = {}
+        if 'parents' in next_actions:
+            additional_attributes['parents'] = next_actions['parents']
+
+        remove_attributes = []
+        if 'remove_attributes' in next_actions:
+            remove_attributes = next_actions['remove_attributes']
+        logger.debug(f'Attributes will be removed: {remove_attributes}')
+
+        for custom_attr in next_actions.get('custom_attributes', []):
+            logger.debug(f"Check to add Custom Attribute: {custom_attr}")
+            for attr_key in list(custom_attr):
+                if attr_key in remove_attributes:
+                    del custom_attr[attr_key]
+                    logger.debug(f"Don't add Attribute {attr_key}, its in remove_attributes")
+            additional_attributes.update(custom_attr)
+
+        for additional_attr in next_actions.get('attributes', []):
+            logger.debug(f"Check to add Attribute: {additional_attr}")
+            if attr_value := attributes['all'].get(additional_attr):
+                additional_attributes[additional_attr] = attr_value
+
+
+        if db_host.hostname not in self.checkmk_hosts:
+            # Create since missing
+            if cluster_nodes:
+                print(f"{CC.OKBLUE} *{CC.ENDC} Will be created as Cluster", flush=True)
+                # We need to create them Later, since we not know that we have all nodes
+                self.clusters.append((db_host, folder, labels, \
+                                    cluster_nodes, additional_attributes))
+            else:
+                print(f"{CC.OKBLUE} *{CC.ENDC} Need to created in Checkmk", flush=True)
+                self.create_host(db_host, folder, labels, additional_attributes)
+            # Add Host information to the dict, for later cleanup.
+            # So no need to query all the hosta again
+            self.checkmk_hosts[db_host.hostname] = \
+                        {'extensions': {
+                            'attributes':{
+                                 'labels': {
+                                      'cmdb_syncer': self.account_id
+                            }}
+                         }}
+        elif not dont_update_host:
+            cmk_host = self.checkmk_hosts[db_host.hostname]
+            # Update if needed
+            self.update_host(db_host, cmk_host, folder,
+                            labels, additional_attributes, remove_attributes,
+                            dont_move_host)
+            if cluster_nodes:
+                cmk_cluster = cmk_host['extensions']['cluster_nodes']
+                self.cluster_updates.append((db_host, cmk_cluster, cluster_nodes))
+        else:
+            print(f"{CC.OKBLUE} *{CC.ENDC} Host is not to be updated", flush=True)
+
+        db_host.save()
+        return True
 #.
 #   .-- Create Folder
     def _create_folder(self, parent, subfolder):
@@ -387,7 +409,7 @@ class SyncCMK2(CMK2):
     def create_folder(self, folder):
         """ Create given folder if not yet exsisting """
         folder_parts = folder.split('/')[1:]
-        print(f"{CC.OKGREEN} *{CC.ENDC} Create Folder in Checkmk {folder}")
+        print(f"{CC.OKGREEN} *{CC.ENDC} Create Folder in Checkmk {folder}", flush=True)
         if len(folder_parts) == 1:
             if folder_parts[0] == '':
                 # we are in page root
@@ -412,8 +434,7 @@ class SyncCMK2(CMK2):
         """
         Send Process to create hosts
         """
-        print()
-        print(f"{CC.OKGREEN} *{CC.ENDC} Send Bulk Create Request")
+        print(f"{CC.OKGREEN} *{CC.ENDC} Send Bulk Create Request", flush=True)
         url = "/domain-types/host_config/actions/bulk-create/invoke"
         try:
             self.request(url, method="POST", data={'entries': entries})
@@ -450,14 +471,14 @@ class SyncCMK2(CMK2):
             # CMK BUG
             if app.config['CMK_22_23_HANDLE_TAG_LABEL_BUG']:
                 self.log_details.append(('info', "CMK Tag bug workarround active"))
-                print(f"{CC.WARNING} *{CC.ENDC} Removed TAGS because of CMK BUG")
+                print(f"{CC.WARNING} *{CC.ENDC} Removed TAGS because of CMK BUG", flush=True)
                 additional_attributes = {x:y for x,y in additional_attributes.items() \
                                             if not x.startswith('tag_')}
 
             body['attributes'].update(additional_attributes)
         if app.config['CMK_BULK_CREATE_HOSTS']:
             self.add_bulk_create_host(body)
-            print(f"{CC.OKBLUE} *{CC.ENDC} Add to Bulk List")
+            print(f"{CC.OKBLUE} *{CC.ENDC} Add to Bulk List", flush=True)
         else:
             url = "/domain-types/host_config/collections/all"
 
@@ -466,7 +487,7 @@ class SyncCMK2(CMK2):
             except CmkException as error:
                 self.log_details.append(('error', f"Host Create Error: {error}"))
                 print(f"{CC.WARNING} *{CC.ENDC} CMK API ERROR {error}")
-            print(f"{CC.OKGREEN} *{CC.ENDC} Created Host {db_host.hostname}")
+            print(f"{CC.OKGREEN} *{CC.ENDC} Created Host {db_host.hostname}", flush=True)
 
 
 
@@ -488,7 +509,7 @@ class SyncCMK2(CMK2):
         if additional_attributes:
             body['attributes'].update(additional_attributes)
 
-        print(f"{CC.OKGREEN} *{CC.ENDC} Create Cluster {db_host.hostname}")
+        print(f"{CC.OKGREEN} *{CC.ENDC} Create Cluster {db_host.hostname}", flush=True)
         self.request(url, method="POST", data=body)
 
 #.
@@ -498,7 +519,7 @@ class SyncCMK2(CMK2):
         """
         Return ETAG of host
         """
-        print(f"{CC.OKGREEN} *{CC.ENDC} Read ETAG in CMK -> {reason}")
+        print(f"{CC.OKGREEN} *{CC.ENDC} Read ETAG in CMK -> {reason}", flush=True)
         url = f"objects/host_config/{db_host.hostname}"
         _, headers = self.request(url, "GET")
         return headers.get('ETag')
@@ -510,7 +531,7 @@ class SyncCMK2(CMK2):
         Update the Nodes of Cluster in case of change
         """
         if cmk_nodes != syncer_nodes:
-            print(f"{CC.OKGREEN} *{CC.ENDC} Cluster has new Nodes {syncer_nodes}")
+            print(f"{CC.OKGREEN} *{CC.ENDC} Cluster has new Nodes {syncer_nodes}", flush=True)
             etag = self.get_etag(db_host)
             update_headers = {
                 'if-match': etag
@@ -531,7 +552,7 @@ class SyncCMK2(CMK2):
         """
 
         print()
-        print(f"{CC.OKGREEN} *{CC.ENDC} Send Bulk Update Request")
+        print(f"{CC.OKGREEN} *{CC.ENDC} Send Bulk Update Request", flush=True)
         url = "/domain-types/host_config/actions/bulk-update/invoke"
         try:
             self.request(url, method="PUT",
@@ -572,7 +593,7 @@ class SyncCMK2(CMK2):
         etag = False
         # Check if we really need to move
         if not dont_move_host and current_folder != folder:
-            print(f"{CC.OKGREEN} *{CC.ENDC} Host Moved from Folder: {current_folder} to {folder}")
+            print(f"{CC.OKGREEN} *{CC.ENDC} Host Moved from Folder: {current_folder} to {folder}", flush=True)
             etag = self.get_etag(db_host, "Move Host")
             update_headers = {
                 'if-match': etag
@@ -591,7 +612,7 @@ class SyncCMK2(CMK2):
                 'if-match': etag,
             }
         if dont_move_host and current_folder != folder:
-            print(f"{CC.WARNING} *{CC.ENDC} Folder Move to {folder} disabled. ")
+            print(f"{CC.WARNING} *{CC.ENDC} Folder Move to {folder} disabled. ", flush=True)
 
         do_update = False
         do_update_labels = False
@@ -694,12 +715,12 @@ class SyncCMK2(CMK2):
                             self.log_details.append(('error', f"CMK API Error: {error}"))
                             print(f"{CC.WARNING} *{CC.ENDC} CMK API ERROR {error}")
                         else:
-                            print(f"{CC.OKGREEN} *{CC.ENDC} Updated Host in Checkmk")
-                            print(f"   Reasons: {what}: {', '.join(update_reasons)}")
+                            print(f"{CC.OKGREEN} *{CC.ENDC} Updated Host in Checkmk", flush=True)
+                            print(f"   Reasons: {what}: {', '.join(update_reasons)}", flush=True)
                     else:
                         payload['host_name'] = db_host.hostname
                         self.add_bulk_update_host(payload)
-                        print(f"{CC.OKBLUE} *{CC.ENDC} Add to Bulk Update List for {what} update")
+                        print(f"{CC.OKBLUE} *{CC.ENDC} Add to Bulk Update List for {what} update", flush=True)
             db_host.set_export_sync()
 
 
