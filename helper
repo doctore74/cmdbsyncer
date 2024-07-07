@@ -6,21 +6,21 @@ APPLICATION=cmdb_syncer-api-1
 
 case "$1" in
 "up")
-    docker-compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER rm
-    docker-compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER up --build --force-recreate -d
+    docker compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER rm
+    docker compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER up --build --force-recreate -d
     ;;
 "start")
-    docker-compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER start
+    docker compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER start
     ;;
 "stop")
-    docker-compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER stop
+    docker compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER stop
     ;;
 "restart")
-    docker-compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER stop
-    docker-compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER start
+    docker compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER stop
+    docker compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER start
     ;;
 "down")
-    docker-compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER down --rmi local --remove-orphans
+    docker compose -f docker-compose.yml -f docker-compose.local.yml -p $CONTAINER down --rmi local --remove-orphans
     ;;
 "cmdbsyncer")
     docker exec -it $APPLICATION ./"$@"
@@ -42,7 +42,7 @@ case "$1" in
     ;;
 *)
     echo "Simple Helper for CMDB Syncer Jobs."
-    echo "For Docker Compose: up, down, start, stop, logs and shell are the options"
+    echo "For Docker Compose: up, down, start, stop, logs, logs -f and shell are the options"
     echo "Create a venv with bve"
     ;;
 esac
